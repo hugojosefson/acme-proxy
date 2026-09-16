@@ -257,9 +257,48 @@ Only consulted when `challenge_strategy = "dns01"`.
 DNS provider used to publish the upstream TXT record. `rfc2136` is currently the
 only implementation.
 
+Public DNS propagation must succeed before CA validation starts. Missing TXT
+answers, resolver errors, and query timeouts cause another query until the
+propagation deadline expires. Matching preserves TXT bytes and case.
+
+The configuration settings are:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `propagation_resolver` | `"1.1.1.1:53"` | Public resolver IP address and port. |
+| `propagation_timeout_secs` | `120` | Maximum propagation wait. |
+| `propagation_interval_ms` | `2000` | Delay between queries. |
+| `query_timeout_secs` | `5` | Maximum time for each query. |
+| `cleanup_timeout_secs` | `120` | Maximum time for two cleanup attempts. |
+| `attempt_timeout_secs` | `900` | Maximum time for the complete DNS relay attempt. |
+
+Environment variables use `ACME_PROXY_SIGNER__RELAY__DNS01__` with the
+uppercase setting name. Seconds must be 1 through 86400. The query interval
+must be 1 through 60000 milliseconds.
+
+The propagation resolver must return public answers. The proxy does not use
+`dns.resolver`, system DNS, or the UPDATE server for this check. Its local
+resolver cache is disabled. The public resolver can cache positive and negative
+answers with DNS TTL rules. Configure a different public resolver if necessary.
+
+The attempt limit must be more than the sum of UPDATE, propagation, validation,
+and cleanup limits. The validation limit is `poll_timeout_secs`. With defaults,
+these limits total 600 seconds. The 900-second attempt limit includes all
+identifiers and certificate retrieval. Increase it for large orders. The relay
+job uses this attempt limit and also stops at the order deadline.
+
+Cleanup removes only the attempt's TXT value after success, propagation failure,
+or validation failure. A worker finishes an in-flight UPDATE before cleanup when
+the caller is cancelled. Cleanup can continue after the attempt deadline. Its
+maximum time is the UPDATE limit plus the cleanup limit. A retry with the same
+value waits for this worker. This coordination applies in one proxy process.
+
+TXT records can stay after process termination. Cleanup failures keep the
+primary failure and cause a log event. Removal of a missing value succeeds.
+
 ### `[signer.relay.dns01.rfc2136]`
 
-All default to `""` and are required once the `dns01` strategy is selected.
+The address, zone, and key settings are necessary for the `dns01` strategy.
 
 **`server`** — *Env: `ACME_PROXY_SIGNER__RELAY__DNS01__RFC2136__SERVER`*
 `host:port` of the nameserver accepting the dynamic update, e.g. `10.0.0.53:53`.
@@ -284,9 +323,19 @@ environment variable over a file on disk.
 The TSIG algorithm, e.g. `hmac-sha256`. Must match the key as your nameserver
 defines it.
 
-Updates are sent over UDP and retried over TCP when the response is truncated —
-a TSIG-signed update readily exceeds 512 bytes, so the TCP path is a normal
-occurrence rather than an edge case.
+**`timeout_secs`** — *Default: `60` | Env: `ACME_PROXY_SIGNER__RELAY__DNS01__RFC2136__TIMEOUT_SECS`*
+Maximum time for one UPDATE with UDP and TCP fallback. The permitted
+range is 1 through 3600 seconds. The cleanup limit must cover this limit.
+
+The proxy accepts UDP responses only from the configured server. It checks
+response TSIG against the request MAC, configured key, algorithm, and time
+window before it accepts status. The maximum time difference is 300 seconds.
+The response must also have the correct ID, response type, and UPDATE opcode.
+
+An authenticated truncated UDP response is necessary for TCP fallback.
+An unsigned or
+invalid truncated response fails the operation. The TCP response must have its
+own correct TSIG and must not be truncated. UDP and TCP share one deadline.
 
 ### `[signer.relay.eab]`
 

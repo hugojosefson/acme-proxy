@@ -26,9 +26,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hickory_proto::op::{Message, update_message};
+use hickory_proto::op::{Message, MessageType, OpCode, update_message};
 use hickory_proto::rr::rdata::TXT;
-use hickory_proto::rr::rdata::tsig::TsigAlgorithm;
+use hickory_proto::rr::rdata::tsig::{TsigAlgorithm, signed_bitmessage_to_buf};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordSet, RecordType, TSigner};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use tokio::net::{TcpStream, UdpSocket};
@@ -51,9 +51,8 @@ pub trait DnsUpdater: Send + Sync {
     /// values, and both must be present at once.
     async fn upsert_txt(&self, name: &str, value: &str) -> Result<(), String>;
 
-    /// Retracts a previously published record. Best-effort: the relay logs a
-    /// failure and carries on, because a leftover challenge record is untidy
-    /// rather than harmful.
+    /// Removes only the supplied TXT value. Repeated removal must succeed
+    /// when the value is absent.
     async fn delete_txt(&self, name: &str, value: &str) -> Result<(), String>;
 }
 
@@ -83,9 +82,6 @@ pub struct Rfc2136Updater {
 /// TTL for a published challenge record, in seconds.
 const CHALLENGE_TTL: u32 = 60;
 
-/// Budget for one update exchange.
-const UPDATE_TIMEOUT: Duration = Duration::from_secs(10);
-
 impl Rfc2136Updater {
     /// Validates the configuration and builds the TSIG signer.
     ///
@@ -95,6 +91,9 @@ impl Rfc2136Updater {
     pub fn from_config(cfg: &Rfc2136Config) -> anyhow::Result<Self> {
         use base64::prelude::*;
 
+        if !(1..=3600).contains(&cfg.timeout_secs) {
+            anyhow::bail!("rfc2136.timeout_secs must be 1 through 3600");
+        }
         if cfg.server.is_empty() {
             anyhow::bail!("signer.relay.dns01.rfc2136.server is not set");
         }
@@ -135,7 +134,7 @@ impl Rfc2136Updater {
             server,
             zone,
             signer,
-            timeout: UPDATE_TIMEOUT,
+            timeout: Duration::from_secs(cfg.timeout_secs),
             ttl: CHALLENGE_TTL,
         })
     }
@@ -144,6 +143,9 @@ impl Rfc2136Updater {
     fn txt_record(&self, name: &str, value: &str) -> Result<Record, String> {
         let name =
             Name::from_utf8(name).map_err(|error| format!("{name} is not a DNS name: {error}"))?;
+        if !self.zone.zone_of(&name) {
+            return Err("DNS update owner is outside the zone".to_string());
+        }
         let mut record = Record::from_rdata(
             name,
             self.ttl,
@@ -168,16 +170,15 @@ impl Rfc2136Updater {
             .to_bytes()
             .map_err(|error| format!("encoding the DNS update failed: {error}"))?;
 
-        let response = tokio::time::timeout(self.timeout, self.exchange(&bytes))
+        let request_mac = &message
+            .signature()
+            .ok_or("DNS request has no TSIG")?
+            .data
+            .mac;
+        let response = tokio::time::timeout(self.timeout, self.exchange(&bytes, id, request_mac))
             .await
             .map_err(|_| format!("DNS update to {} timed out", self.server))??;
 
-        let response = Message::from_bytes(&response)
-            .map_err(|error| format!("decoding the DNS response failed: {error}"))?;
-
-        if response.id != id {
-            return Err("DNS response id did not match the request".to_string());
-        }
         match response.response_code {
             ResponseCode::NoError => Ok(()),
             other => Err(format!("DNS update refused: {other}")),
@@ -187,7 +188,12 @@ impl Rfc2136Updater {
     /// Sends over UDP, retrying on TCP when the answer is truncated — the
     /// ordinary DNS fallback, and necessary because a TSIG-signed update can
     /// exceed 512 bytes.
-    async fn exchange(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+    async fn exchange(
+        &self,
+        request: &[u8],
+        id: u16,
+        request_mac: &[u8],
+    ) -> Result<Message, String> {
         let bind: SocketAddr = if self.server.is_ipv4() {
             "0.0.0.0:0".parse().expect("a valid bind address")
         } else {
@@ -198,7 +204,11 @@ impl Rfc2136Updater {
             .await
             .map_err(|error| format!("binding a UDP socket failed: {error}"))?;
         socket
-            .send_to(request, self.server)
+            .connect(self.server)
+            .await
+            .map_err(|_| "connecting the DNS UDP socket failed".to_string())?;
+        socket
+            .send(request)
             .await
             .map_err(|error| format!("sending to {} failed: {error}", self.server))?;
 
@@ -209,18 +219,54 @@ impl Rfc2136Updater {
             .map_err(|error| format!("no answer from {}: {error}", self.server))?;
         buffer.truncate(read);
 
-        // A truncated answer means "ask again over TCP" (RFC 1035 §4.2.1).
-        if Message::from_bytes(&buffer)
-            .map(|message| message.truncation)
-            .unwrap_or(false)
-        {
+        let response = self.verify_response(&buffer, id, request_mac)?;
+        if response.truncation {
             debug!(
                 event = "signer_relay_dns_01_update_truncated",
                 outcome = "progress"
             );
-            return self.exchange_tcp(request).await;
+            let bytes = self.exchange_tcp(request).await?;
+            let response = self.verify_response(&bytes, id, request_mac)?;
+            if response.truncation {
+                return Err("DNS TCP response is truncated".to_string());
+            }
+            return Ok(response);
         }
-        Ok(buffer)
+        Ok(response)
+    }
+
+    fn verify_response(
+        &self,
+        bytes: &[u8],
+        id: u16,
+        request_mac: &[u8],
+    ) -> Result<Message, String> {
+        let response = Message::from_bytes(bytes)
+            .map_err(|_| "decoding the DNS response failed".to_string())?;
+        let (signed, record) = signed_bitmessage_to_buf(bytes, Some(request_mac), true)
+            .map_err(|_| "DNS response TSIG is missing or invalid".to_string())?;
+        let tsig = &record.data;
+        if record.name != *self.signer.signer_name()
+            || tsig.algorithm != *self.signer.algorithm()
+            || record.dns_class != DNSClass::ANY
+            || record.ttl != 0
+        {
+            return Err("DNS response TSIG does not match the configured key".to_string());
+        }
+        self.signer
+            .verify(&signed, &tsig.mac)
+            .map_err(|_| "DNS response TSIG verification failed".to_string())?;
+        let window = u64::from(tsig.fudge.min(self.signer.fudge()));
+        if now_secs().abs_diff(tsig.time) > window || tsig.error.is_some() {
+            return Err("DNS response TSIG time or status is invalid".to_string());
+        }
+        if response.id != id || tsig.oid != id {
+            return Err("DNS response id did not match the request".to_string());
+        }
+        if response.message_type != MessageType::Response || response.op_code != OpCode::Update {
+            return Err("DNS response type or opcode is invalid".to_string());
+        }
+        Ok(response)
     }
 
     async fn exchange_tcp(&self, request: &[u8]) -> Result<Vec<u8>, String> {
@@ -273,7 +319,9 @@ impl DnsUpdater for Rfc2136Updater {
 
     async fn delete_txt(&self, name: &str, value: &str) -> Result<(), String> {
         let record = self.txt_record(name, value)?;
-        let message = update_message::delete_rrset(record, self.zone.clone(), true);
+        let mut rrset = RecordSet::new(record.name.clone(), RecordType::TXT, 0);
+        rrset.insert(record, 0);
+        let message = update_message::delete_by_rdata(rrset, self.zone.clone(), true);
         self.send(message).await
     }
 }
@@ -311,6 +359,7 @@ mod tests {
             tsig_key_name: "acme-key.".to_string(),
             tsig_key_secret: BASE64_STANDARD.encode(b"0123456789abcdef0123456789abcdef"),
             tsig_algorithm: "hmac-sha256".to_string(),
+            ..Rfc2136Config::default()
         }
     }
 
@@ -433,6 +482,9 @@ mod tests {
             WrongId,
             /// Answer with bytes that are not a DNS message at all.
             Garbage,
+            UnsignedTruncated,
+            UnsignedTcp,
+            TruncatedTcp,
         }
 
         /// Binds UDP and TCP on one loopback port and serves exactly one
@@ -458,9 +510,21 @@ mod tests {
 
                 let bytes = match udp {
                     Udp::Garbage => b"definitely not DNS".to_vec(),
-                    Udp::Answer(code) => reply(request.id, code, false),
-                    Udp::WrongId => reply(request.id.wrapping_add(1), ResponseCode::NoError, false),
-                    Udp::Truncated => reply(request.id, ResponseCode::NoError, true),
+                    Udp::Answer(code) => reply(&request, request.id, code, false),
+                    Udp::WrongId => reply(
+                        &request,
+                        request.id.wrapping_add(1),
+                        ResponseCode::NoError,
+                        false,
+                    ),
+                    Udp::Truncated | Udp::UnsignedTcp | Udp::TruncatedTcp => {
+                        reply(&request, request.id, ResponseCode::NoError, true)
+                    }
+                    Udp::UnsignedTruncated => {
+                        let mut message = Message::response(request.id, OpCode::Update);
+                        message.metadata.truncation = true;
+                        message.to_bytes().unwrap()
+                    }
                 };
                 socket.send_to(&bytes, peer).await.unwrap();
             });
@@ -477,8 +541,14 @@ mod tests {
                 if stream.read_exact(&mut request).await.is_err() {
                     return;
                 }
-                let id = Message::from_bytes(&request).map(|m| m.id).unwrap_or(0);
-                let bytes = reply(id, ResponseCode::NoError, false);
+                let request = Message::from_bytes(&request).unwrap();
+                let bytes = match udp {
+                    Udp::UnsignedTcp => Message::response(request.id, OpCode::Update)
+                        .to_bytes()
+                        .unwrap(),
+                    Udp::TruncatedTcp => reply(&request, request.id, ResponseCode::NoError, true),
+                    _ => reply(&request, request.id, ResponseCode::NoError, false),
+                };
                 let framed = u16::try_from(bytes.len()).unwrap().to_be_bytes();
                 let _ = stream.write_all(&framed).await;
                 let _ = stream.write_all(&bytes).await;
@@ -487,11 +557,12 @@ mod tests {
             Server { addr }
         }
 
-        fn reply(id: u16, code: ResponseCode, truncated: bool) -> Vec<u8> {
+        fn reply(request: &Message, id: u16, code: ResponseCode, truncated: bool) -> Vec<u8> {
             let mut message = Message::response(id, OpCode::Update);
             message.metadata.message_type = MessageType::Response;
             message.metadata.response_code = code;
             message.metadata.truncation = truncated;
+            sign_reply(&mut message, request);
             message.to_bytes().unwrap()
         }
     }
@@ -550,11 +621,17 @@ mod tests {
     /// fallback is a normal path here rather than an edge case.
     #[tokio::test]
     async fn a_truncated_answer_is_retried_over_tcp() {
-        let server = stub::spawn(stub::Udp::Truncated).await;
-        updater_for(server.addr)
-            .upsert_txt("_acme-challenge.example.org.", "digest-value")
-            .await
-            .expect("the TCP retry must carry the answer");
+        for algorithm in ["hmac-sha256", "hmac-sha384", "hmac-sha512"] {
+            let server = stub::spawn(stub::Udp::Truncated).await;
+            let mut cfg = config();
+            cfg.server = server.addr.to_string();
+            cfg.tsig_algorithm = algorithm.into();
+            Rfc2136Updater::from_config(&cfg)
+                .unwrap()
+                .upsert_txt("_acme-challenge.example.org.", "digest-value")
+                .await
+                .unwrap();
+        }
     }
 
     /// An answer to somebody else's question is not an answer to this one —
@@ -593,9 +670,9 @@ mod tests {
     /// indefinitely — the relay has its own budget to respect.
     #[tokio::test]
     async fn an_unanswered_update_times_out() {
-        // Port 1 on loopback: nothing listens, and UDP gives no refusal.
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut cfg = config();
-        cfg.server = "127.0.0.1:1".to_string();
+        cfg.server = socket.local_addr().unwrap().to_string();
         let mut updater = Rfc2136Updater::from_config(&cfg).unwrap();
         updater.timeout = Duration::from_millis(100);
 
@@ -607,5 +684,219 @@ mod tests {
             error.contains("timed out") || error.contains("failed"),
             "{error}"
         );
+    }
+
+    fn sign_reply(message: &mut Message, request: &Message) {
+        use hickory_proto::rr::rdata::tsig::{TSIG, make_tsig_record};
+        let mut cfg = config();
+        cfg.tsig_algorithm = request.signature().unwrap().data.algorithm.to_string();
+        let updater = Rfc2136Updater::from_config(&cfg).unwrap();
+        let signer = &updater.signer;
+        let tsig = TSIG::new(
+            signer.algorithm().clone(),
+            now_secs(),
+            signer.fudge(),
+            Vec::new(),
+            message.id,
+            None,
+            Vec::new(),
+        );
+        let tbs = signer
+            .encode_response_tbs(
+                &request.signature().unwrap().data.mac,
+                &message.to_bytes().unwrap(),
+                &tsig,
+            )
+            .unwrap();
+        let mac = signer.sign(&tbs).unwrap();
+        message.set_signature(Box::new(make_tsig_record(
+            signer.signer_name().clone(),
+            tsig.set_mac(mac),
+        )));
+    }
+    #[tokio::test]
+    async fn wire_operations_preserve_other_values_and_authenticate_requests() {
+        use std::collections::BTreeSet;
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let updater = updater_for(socket.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let verifier = Rfc2136Updater::from_config(&config()).unwrap();
+            let mut values = BTreeSet::new();
+            for (add, value, expected) in [
+                (true, "VaLuE-A", vec!["VaLuE-A"]),
+                (true, "value-b", vec!["VaLuE-A", "value-b"]),
+                (true, "VaLuE-A", vec!["VaLuE-A", "value-b"]),
+                (false, "VaLuE-A", vec!["value-b"]),
+                (false, "VaLuE-A", vec!["value-b"]),
+                (false, "value-b", vec![]),
+            ] {
+                let mut buffer = [0; 4096];
+                let (n, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                verifier
+                    .signer
+                    .verify_message_byte(&buffer[..n], None, true)
+                    .unwrap();
+                let request = Message::from_bytes(&buffer[..n]).unwrap();
+                assert_eq!(request.op_code, OpCode::Update);
+                assert_eq!(request.queries.len(), 1);
+                assert_eq!(request.queries[0].name(), &verifier.zone);
+                assert_eq!(request.queries[0].query_type(), RecordType::SOA);
+                assert!(request.answers.is_empty());
+                assert_eq!(request.authorities.len(), 1);
+                let record = &request.authorities[0];
+                assert_eq!(
+                    record.name,
+                    Name::from_ascii("_acme-challenge.example.org.").unwrap()
+                );
+                assert_eq!(
+                    record.dns_class,
+                    if add { DNSClass::IN } else { DNSClass::NONE }
+                );
+                assert_eq!(record.ttl, if add { CHALLENGE_TTL } else { 0 });
+                assert_eq!(record.data, RData::TXT(TXT::new(vec![value.to_string()])));
+                if add {
+                    values.insert(value);
+                } else {
+                    values.remove(value);
+                }
+                assert_eq!(values.iter().copied().collect::<Vec<_>>(), expected);
+                let mut response = Message::response(request.id, OpCode::Update);
+                sign_reply(&mut response, &request);
+                socket
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        for value in ["VaLuE-A", "value-b", "VaLuE-A"] {
+            updater
+                .upsert_txt("_acme-challenge.example.org.", value)
+                .await
+                .unwrap();
+        }
+        for value in ["VaLuE-A", "VaLuE-A", "value-b"] {
+            updater
+                .delete_txt("_acme-challenge.example.org.", value)
+                .await
+                .unwrap();
+        }
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn response_authentication_rejects_each_invalid_field() {
+        use hickory_proto::rr::rdata::tsig::{TSIG, make_tsig_record};
+        for algorithm in ["hmac-sha256", "hmac-sha384", "hmac-sha512"] {
+            let mut cfg = config();
+            cfg.tsig_algorithm = algorithm.into();
+            let updater = Rfc2136Updater::from_config(&cfg).unwrap();
+            let mut request = update_message::delete_all(
+                Name::from_ascii("example.org.").unwrap(),
+                updater.zone.clone(),
+                DNSClass::IN,
+                true,
+            );
+            request.finalize(&updater.signer, now_secs()).unwrap();
+            let request_mac = &request.signature().unwrap().data.mac;
+            for case in 0..15 {
+                let mut response = Message::response(request.id, OpCode::Update);
+                let mut tsig = TSIG::new(
+                    updater.signer.algorithm().clone(),
+                    now_secs(),
+                    300,
+                    Vec::new(),
+                    request.id,
+                    None,
+                    Vec::new(),
+                );
+                let mut name = updater.signer.signer_name().clone();
+                match case {
+                    1 => response.metadata.id = response.id.wrapping_add(1),
+                    2 => response.metadata.op_code = OpCode::Query,
+                    3 => response.metadata.message_type = MessageType::Query,
+                    4 => tsig.time = tsig.time.saturating_sub(301),
+                    5 => tsig.time += 301,
+                    6 => tsig.oid = tsig.oid.wrapping_add(1),
+                    7 => name = Name::from_ascii("other-key.").unwrap(),
+                    8 => tsig.time = 0,
+                    9 => {
+                        tsig.time += 301;
+                        tsig.fudge = u16::MAX;
+                    }
+                    _ => {}
+                }
+                let previous = if case == 10 {
+                    &[1, 2, 3][..]
+                } else {
+                    request_mac
+                };
+                let signed = updater
+                    .signer
+                    .encode_response_tbs(previous, &response.to_bytes().unwrap(), &tsig)
+                    .unwrap();
+                tsig.mac = updater.signer.sign(&signed).unwrap();
+                if case == 11 {
+                    tsig.mac[0] ^= 1;
+                }
+                if case == 12 {
+                    tsig.mac.truncate(8);
+                }
+                if case == 13 {
+                    tsig.algorithm = TsigAlgorithm::HmacSha1;
+                }
+                if case != 14 {
+                    response.set_signature(Box::new(make_tsig_record(name, tsig)));
+                }
+                let result =
+                    updater.verify_response(&response.to_bytes().unwrap(), request.id, request_mac);
+                assert_eq!(
+                    result.is_ok(),
+                    case == 0,
+                    "{algorithm} case {case}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_rejects_a_response_from_another_peer() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut updater = updater_for(socket.local_addr().unwrap());
+        updater.timeout = Duration::from_millis(100);
+        let server = tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            let (n, peer) = socket.recv_from(&mut buffer).await.unwrap();
+            let request = Message::from_bytes(&buffer[..n]).unwrap();
+            let mut response = Message::response(request.id, OpCode::Update);
+            sign_reply(&mut response, &request);
+            let attacker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            attacker
+                .send_to(&response.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        });
+        let result = updater
+            .upsert_txt("_acme-challenge.example.org.", "value")
+            .await;
+        assert!(result.unwrap_err().contains("timed out"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_truncation_and_invalid_tcp_responses_fail() {
+        for mode in [
+            stub::Udp::UnsignedTruncated,
+            stub::Udp::UnsignedTcp,
+            stub::Udp::TruncatedTcp,
+        ] {
+            let server = stub::spawn(mode).await;
+            assert!(
+                updater_for(server.addr)
+                    .upsert_txt("_acme-challenge.example.org.", "value")
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

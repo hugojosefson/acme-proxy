@@ -51,6 +51,8 @@ use crate::sqlite::upstream_order::UpstreamOrder;
 pub mod account;
 pub mod client;
 pub mod dns01;
+mod dns01_cleanup;
+mod dns01_propagation;
 pub mod eab;
 pub mod flow;
 pub mod http01;
@@ -131,6 +133,7 @@ struct Inner {
     database: Arc<Database>,
     strategy: ChallengeStrategy,
     poll: PollConfig,
+    dns01_propagation: Option<dns01_propagation::Propagation>,
     /// The whole `profile name -> dispatcher` map, not merely the profiles this
     /// backend relays for: a cheap clone either way, and it sidesteps keeping a
     /// second, filtered copy in sync. `settle()` looks up the right one by
@@ -293,7 +296,13 @@ impl RelaySigner {
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("upstream provisioning thread panicked")))
         })?;
 
+        let dns01_propagation = if cfg.challenge_strategy == "dns01" {
+            Some(dns01_propagation::Propagation::from_config(cfg)?)
+        } else {
+            None
+        };
         Ok(Self(Arc::new(Inner {
+            dns01_propagation,
             client,
             account,
             kid,
@@ -526,3 +535,11 @@ impl SignerBackend for RelaySigner {
 
 #[cfg(test)]
 mod tests;
+
+impl Inner {
+    fn attempt_timeout(&self) -> Duration {
+        self.dns01_propagation
+            .as_ref()
+            .map_or(self.poll.timeout, |dns| dns.attempt_timeout)
+    }
+}

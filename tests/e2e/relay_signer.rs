@@ -86,6 +86,11 @@ async fn test_relay_signer_dns_01() {
                 "/tmp/upstream_account.key",
             ),
             ("ACME_PROXY_SIGNER__RELAY__CHALLENGE_STRATEGY", "dns01"),
+            // The fixture supplies controlled answers on a different port.
+            (
+                "ACME_PROXY_SIGNER__RELAY__DNS01__PROPAGATION_RESOLVER",
+                "DNS_SERVER_HOST:5353",
+            ),
             (
                 "ACME_PROXY_SIGNER__RELAY__DNS01__RFC2136__SERVER",
                 "DNS_SERVER_HOST:53",

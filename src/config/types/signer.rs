@@ -151,6 +151,13 @@ pub struct RelayEabConfig {
 pub struct Dns01Config {
     pub provider: String,
     pub rfc2136: Rfc2136Config,
+    /// Public DNS resolver, independent of the system resolver.
+    pub propagation_resolver: String,
+    pub propagation_timeout_secs: u64,
+    pub propagation_interval_ms: u64,
+    pub query_timeout_secs: u64,
+    pub cleanup_timeout_secs: u64,
+    pub attempt_timeout_secs: u64,
 }
 
 impl Default for Dns01Config {
@@ -158,11 +165,17 @@ impl Default for Dns01Config {
         Self {
             provider: "rfc2136".to_string(),
             rfc2136: Rfc2136Config::default(),
+            propagation_resolver: "1.1.1.1:53".to_string(),
+            propagation_timeout_secs: 120,
+            propagation_interval_ms: 2000,
+            query_timeout_secs: 5,
+            cleanup_timeout_secs: 120,
+            attempt_timeout_secs: 900,
         }
     }
 }
 /// RFC 2136 dynamic DNS update, authenticated with TSIG.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Rfc2136Config {
     /// `host:port` of the authoritative server accepting the update.
@@ -175,6 +188,20 @@ pub struct Rfc2136Config {
     /// environment variable over a file on disk.
     pub tsig_key_secret: String,
     pub tsig_algorithm: String,
+    pub timeout_secs: u64,
+}
+
+impl Default for Rfc2136Config {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            zone: String::new(),
+            tsig_key_name: String::new(),
+            tsig_key_secret: String::new(),
+            tsig_algorithm: String::new(),
+            timeout_secs: 60,
+        }
+    }
 }
 /// Configuration for the persistent local-CA signer backend.
 #[derive(Debug, Clone, Deserialize)]

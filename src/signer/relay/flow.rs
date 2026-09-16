@@ -41,6 +41,7 @@ use crate::jobs::{JobHandler, JobOutcome, JobQueue, JobSpec};
 use crate::notify::{CertificateIssuedData, NotifyEvent};
 use crate::sqlite::db::Database;
 use crate::sqlite::job::Job;
+use crate::sqlite::nonce::now_secs;
 use crate::sqlite::order::Order;
 use crate::sqlite::upstream_order::UpstreamOrder;
 
@@ -168,7 +169,10 @@ impl RelayJob {
             }
         }
 
-        let longest_lease = targets.iter().map(|(_, state)| state.0.poll.timeout).max();
+        let longest_lease = targets
+            .iter()
+            .map(|(_, state)| state.0.attempt_timeout())
+            .max();
 
         Self {
             targets: targets
@@ -237,20 +241,12 @@ impl JobHandler for RelayJob {
         RELAY_JOB_KIND
     }
 
-    /// The per-attempt budget is the **owning profile's**
-    /// `signer.relay.poll_timeout_secs`, which is what the hand-rolled
-    /// `tokio::time::timeout` around this used to be — so an attempt is bounded
-    /// exactly as before, and the queue adds retries on top rather than changing
-    /// how long one try may take.
-    ///
-    /// Per profile rather than one number for the handler because
-    /// [`poll_until`] has no deadline of its own: this is the only thing
-    /// bounding it, so a shared maximum would let an endpoint configured for a
-    /// minute poll for five. A row naming no profile falls back to the longest
-    /// configured budget, this being synchronous and having no order to read.
+    /// The owning profile supplies the attempt limit. DNS-01 uses its
+    /// extended limit to include UPDATE, propagation, and cleanup.
+    /// A job without a profile uses the longest configured limit.
     fn lease(&self, job: &Job) -> Option<Duration> {
         self.target_for(job)
-            .map(|inner| inner.poll.timeout)
+            .map(|inner| inner.attempt_timeout())
             .or(self.longest_lease)
     }
 
@@ -293,14 +289,26 @@ impl JobHandler for RelayJob {
             }
         };
 
-        match relay(
+        let work = relay(
             inner,
             order_id,
             &mapping.csr_der,
             &mapping.upstream_order_url,
-        )
-        .await
-        {
+        );
+        let result = if inner.dns01_propagation.is_some() {
+            let remaining = job.deadline.map_or(inner.attempt_timeout(), |deadline| {
+                Duration::from_secs(deadline.saturating_sub(now_secs()).max(0) as u64)
+                    .min(inner.attempt_timeout())
+            });
+            tokio::time::timeout(remaining, work)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(RelayFailure::Retryable("DNS relay deadline expired".into()))
+                })
+        } else {
+            work.await
+        };
+        match result {
             Ok(chain) => settle(inner, order_id, chain).await,
             Err(RelayFailure::Retryable(reason)) => JobOutcome::Retry(reason),
             Err(RelayFailure::Permanent(reason)) => JobOutcome::Failed(reason),
@@ -479,8 +487,8 @@ async fn relay(
     match &inner.strategy {
         ChallengeStrategy::Dns01(updater) => {
             let view = poll_until(inner, order_url, &["pending", "ready", "valid"]).await?;
-            if view.status == "pending" {
-                answer_dns01(inner, updater.as_ref(), &view.authorizations).await?;
+            if matches!(view.status.as_str(), "pending" | "ready" | "valid") {
+                answer_dns01(inner, updater.clone(), &view.authorizations).await?;
             }
         }
         ChallengeStrategy::Http01(tokens) => {
@@ -580,7 +588,7 @@ fn upstream_thumbprint(inner: &Inner) -> Result<String, RelayFailure> {
 /// `jwk_thumbprint` rather than rebuilt here.
 async fn answer_dns01(
     inner: &Inner,
-    updater: &dyn dns01::DnsUpdater,
+    updater: Arc<dyn dns01::DnsUpdater>,
     authorizations: &[String],
 ) -> Result<(), RelayFailure> {
     let thumbprint = upstream_thumbprint(inner)?;
@@ -588,8 +596,16 @@ async fn answer_dns01(
     for authz_url in authorizations {
         let authz = read_authz(inner, authz_url).await?;
 
-        // Already proved (a re-run after a restart, or a reused authorization).
-        if authz.status != "pending" {
+        let completed = authz.status == "valid";
+        if authz.status != "pending" && !completed {
+            continue;
+        }
+        // A reused authorization can omit its challenge token.
+        if completed
+            && !authz.challenges.iter().any(|challenge| {
+                challenge.typ == crate::challenge::DNS_01 && challenge.token.is_some()
+            })
+        {
             continue;
         }
 
@@ -623,20 +639,35 @@ async fn answer_dns01(
             format!("{name}.")
         };
 
-        // Retryable: a nameserver that refused an update, or was unreachable,
-        // is the commonest transient failure on this path.
-        updater.upsert_txt(&fqdn, &value).await.map_err(|error| {
-            RelayFailure::Retryable(format!("publishing {fqdn} failed: {error}"))
+        let settings = inner.dns01_propagation.as_ref().ok_or_else(|| {
+            RelayFailure::Permanent("DNS propagation settings are missing".to_string())
         })?;
-
-        let triggered = trigger_and_await(inner, &challenge.url, authz_url).await;
-
-        // Cleanup is best-effort and happens whether or not validation passed:
-        // a challenge record has no reason to outlive the attempt.
-        if let Err(error) = updater.delete_txt(&fqdn, &value).await {
-            warn!(event = "signer_relay_dns_01_cleanup_failed", outcome = "failure", name = %fqdn, error = %error);
+        if completed {
+            super::dns01_cleanup::remove(updater.as_ref(), settings, &fqdn, &value)
+                .await
+                .map_err(RelayFailure::Retryable)?;
+            continue;
         }
-        triggered?;
+        let published = super::dns01_cleanup::PublishedTxt::publish(
+            updater.clone(),
+            settings,
+            fqdn.clone(),
+            value.clone(),
+        )
+        .await
+        .map_err(RelayFailure::Retryable)?;
+        let result = match settings.wait(&fqdn, &value).await {
+            Ok(()) => tokio::time::timeout(
+                inner.poll.timeout,
+                trigger_and_await(inner, &challenge.url, authz_url),
+            )
+            .await
+            .unwrap_or_else(|_| Err(RelayFailure::Retryable("CA validation timed out".into()))),
+            Err(error) => Err(RelayFailure::Retryable(error)),
+        };
+        let cleanup = published.cleanup().await;
+        result?;
+        cleanup.map_err(RelayFailure::Retryable)?;
     }
     Ok(())
 }

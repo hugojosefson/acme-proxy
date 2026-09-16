@@ -548,8 +548,18 @@ hmac_key = ""                       # ACME_PROXY_SIGNER__RELAY__EAB__HMAC_KEY
 # update (BIND, PowerDNS, Knot, CoreDNS with the `update` plugin) rather than
 # tying the server to one cloud vendor's API.
 provider = "rfc2136"                # ACME_PROXY_SIGNER__RELAY__DNS01__PROVIDER
+# This resolver must return public DNS answers. Local caching is disabled.
+propagation_resolver = "1.1.1.1:53" # ACME_PROXY_SIGNER__RELAY__DNS01__PROPAGATION_RESOLVER
+propagation_timeout_secs = 120     # ACME_PROXY_SIGNER__RELAY__DNS01__PROPAGATION_TIMEOUT_SECS
+propagation_interval_ms = 2000     # ACME_PROXY_SIGNER__RELAY__DNS01__PROPAGATION_INTERVAL_MS
+query_timeout_secs = 5             # ACME_PROXY_SIGNER__RELAY__DNS01__QUERY_TIMEOUT_SECS
+cleanup_timeout_secs = 120         # ACME_PROXY_SIGNER__RELAY__DNS01__CLEANUP_TIMEOUT_SECS
+# Includes all authorizations. Increase this limit for large orders.
+attempt_timeout_secs = 900         # ACME_PROXY_SIGNER__RELAY__DNS01__ATTEMPT_TIMEOUT_SECS
 
 [signer.relay.dns01.rfc2136]
+# One deadline includes UDP and TCP fallback.
+timeout_secs = 60                   # ACME_PROXY_SIGNER__RELAY__DNS01__RFC2136__TIMEOUT_SECS
 # host:port of the authoritative server that accepts the update.
 server = ""                         # ACME_PROXY_SIGNER__RELAY__DNS01__RFC2136__SERVER
 # The zone being updated, e.g. "example.org." (trailing dot).

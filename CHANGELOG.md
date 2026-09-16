@@ -29,6 +29,18 @@ Read this section before an upgrade, and `acme-proxy filter show` builds a
 `[filter]` policy exactly as startup does, so it is the cheapest way to check a
 migrated configuration before restarting.
 
+## Unreleased
+
+### Fixed
+
+The DNS-01 changes are:
+
+- DNS-01 cleanup removes only the supplied TXT value. RFC 2136 responses must
+  have correct TSIG authentication and come from the configured UDP peer.
+- DNS-01 waits for public TXT propagation before CA validation. Configuration
+  settings control UPDATE, propagation, cleanup, and relay attempt deadlines.
+  Cancellation starts bounded cleanup after the UPDATE finishes.
+
 ## [0.5.0] — 2026-09-08
 
 ### Breaking

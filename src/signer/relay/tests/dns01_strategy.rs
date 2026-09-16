@@ -8,6 +8,9 @@ struct StubUpdater {
     published: std::sync::Mutex<Vec<(String, String)>>,
     deleted: std::sync::Mutex<Vec<(String, String)>>,
     fail: bool,
+    hidden: std::sync::atomic::AtomicBool,
+    queries: std::sync::atomic::AtomicUsize,
+    cleanup_fail: bool,
 }
 
 #[async_trait]
@@ -27,7 +30,47 @@ impl dns01::DnsUpdater for StubUpdater {
             .lock()
             .unwrap()
             .push((name.to_string(), value.to_string()));
+        if self.cleanup_fail {
+            return Err("cleanup failed".into());
+        }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::dns::Resolver for StubUpdater {
+    async fn reverse(&self, _: std::net::IpAddr) -> Result<Vec<String>, String> {
+        unreachable!()
+    }
+    async fn forward(&self, _: &str) -> Result<Vec<std::net::IpAddr>, String> {
+        unreachable!()
+    }
+    async fn txt(&self, name: &str) -> Result<Vec<String>, String> {
+        self.queries
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.hidden.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(vec!["unrelated-value".into()]);
+        }
+        Ok(self
+            .published
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(owner, _)| owner == name)
+            .map(|(_, value)| value.clone())
+            .collect())
+    }
+}
+
+fn propagation(updater: Arc<StubUpdater>) -> super::super::dns01_propagation::Propagation {
+    super::super::dns01_propagation::Propagation {
+        resolver: updater,
+        timeout: Duration::from_millis(200),
+        interval: Duration::from_millis(5),
+        query_timeout: Duration::from_millis(20),
+        update_timeout: Duration::from_millis(100),
+        cleanup_timeout: Duration::from_millis(200),
+        attempt_timeout: Duration::from_secs(5),
     }
 }
 
@@ -36,6 +79,7 @@ impl dns01::DnsUpdater for StubUpdater {
 fn with_updater(signer: RelaySigner, updater: Arc<StubUpdater>) -> RelaySigner {
     let inner = Arc::try_unwrap(signer.0).unwrap_or_else(|_| panic!("sole owner"));
     RelaySigner(Arc::new(Inner {
+        dns01_propagation: Some(propagation(updater.clone())),
         strategy: ChallengeStrategy::Dns01(updater),
         ..inner
     }))
@@ -461,4 +505,205 @@ async fn bypass_prefers_a_challenge_it_could_answer() {
 
     assert_eq!(upstream.challenge_triggered(), 1);
     assert_eq!(upstream.tokenless_triggered(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns01_waits_for_public_dns_before_ca_validation() {
+    use std::sync::atomic::Ordering;
+    let upstream = testsrv::start(Script {
+        chain: real_chain().await,
+        pose_challenge: true,
+        ..Script::default()
+    })
+    .await;
+    let dir = TempDir::new("propagation");
+    let db = database().await;
+    let queue = test_queue(db.clone());
+    let updater = Arc::new(StubUpdater::default());
+    updater.hidden.store(true, Ordering::SeqCst);
+    let signer = with_updater(
+        RelaySigner::from_config(
+            &config(&upstream, &dir),
+            &relay_parts(db.clone(), no_notifiers(), queue.clone()),
+            &crate::signer::CarriedState::new(),
+        )
+        .unwrap(),
+        updater.clone(),
+    );
+    let _runner = TestRunner::start(queue, &signer);
+    let order = ready_order(db.clone()).await;
+    signer
+        .issue(
+            &order.id.to_string(),
+            &csr_der(),
+            &identifiers(),
+            RequestedValidity::default(),
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while updater.queries.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(upstream.challenge_triggered(), 0);
+    assert!(updater.deleted.lock().unwrap().is_empty());
+    updater.hidden.store(false, Ordering::SeqCst);
+    await_status(db, &order.id.to_string(), OrderStatus::Valid).await;
+    assert_eq!(upstream.challenge_triggered(), 1);
+    assert_eq!(
+        *updater.deleted.lock().unwrap(),
+        *updater.published.lock().unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns01_propagation_and_outer_deadlines_clean_up_without_validation() {
+    for outer_timeout in [false, true] {
+        let upstream = testsrv::start(Script {
+            pose_challenge: true,
+            ..Script::default()
+        })
+        .await;
+        let dir = TempDir::new("propagation-timeout");
+        let db = database().await;
+        let queue = test_queue(db.clone());
+        let updater = Arc::new(StubUpdater::default());
+        updater
+            .hidden
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let signer = with_updater(
+            RelaySigner::from_config(
+                &config(&upstream, &dir),
+                &relay_parts(db.clone(), no_notifiers(), queue.clone()),
+                &crate::signer::CarriedState::new(),
+            )
+            .unwrap(),
+            updater.clone(),
+        );
+        let mut inner = Arc::try_unwrap(signer.0).ok().unwrap();
+        if outer_timeout {
+            inner.dns01_propagation.as_mut().unwrap().attempt_timeout = Duration::from_millis(50);
+        }
+        let signer = RelaySigner(Arc::new(inner));
+        let _runner = TestRunner::start(queue, &signer);
+        let order = ready_order(db.clone()).await;
+        signer
+            .issue(
+                &order.id.to_string(),
+                &csr_der(),
+                &identifiers(),
+                RequestedValidity::default(),
+            )
+            .await
+            .unwrap();
+        await_status(db, &order.id.to_string(), OrderStatus::Invalid).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while updater.deleted.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(upstream.challenge_triggered(), 0);
+        assert_eq!(
+            *updater.deleted.lock().unwrap(),
+            *updater.published.lock().unwrap()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dns01_cleanup_failure_preserves_ca_failure() {
+    let upstream = testsrv::start(Script {
+        pose_challenge: true,
+        fail_challenge: true,
+        ..Script::default()
+    })
+    .await;
+    let dir = TempDir::new("cleanup-failure");
+    let db = database().await;
+    let queue = test_queue(db.clone());
+    let updater = Arc::new(StubUpdater {
+        cleanup_fail: true,
+        ..StubUpdater::default()
+    });
+    let signer = with_updater(
+        RelaySigner::from_config(
+            &config(&upstream, &dir),
+            &relay_parts(db.clone(), no_notifiers(), queue.clone()),
+            &crate::signer::CarriedState::new(),
+        )
+        .unwrap(),
+        updater.clone(),
+    );
+    let _runner = TestRunner::start(queue, &signer);
+    let order = ready_order(db.clone()).await;
+    signer
+        .issue(
+            &order.id.to_string(),
+            &csr_der(),
+            &identifiers(),
+            RequestedValidity::default(),
+        )
+        .await
+        .unwrap();
+    await_status(db.clone(), &order.id.to_string(), OrderStatus::Invalid).await;
+    let mapping = UpstreamOrder::find_by_order_id(&order.id.to_string(), &db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(mapping.error.unwrap().contains("upstream rejected"));
+    assert_eq!(updater.deleted.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn cancellation_during_update_waits_for_the_write_before_cleanup() {
+    struct SlowUpdater {
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        deleted: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl dns01::DnsUpdater for SlowUpdater {
+        async fn upsert_txt(&self, _: &str, _: &str) -> Result<(), String> {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+        async fn delete_txt(&self, _: &str, value: &str) -> Result<(), String> {
+            assert_eq!(value, "attempt-value");
+            self.deleted.notify_one();
+            Ok(())
+        }
+    }
+    let updater = Arc::new(SlowUpdater {
+        started: Default::default(),
+        release: Default::default(),
+        deleted: Default::default(),
+    });
+    let worker_updater = updater.clone();
+    let task = tokio::spawn(async move {
+        super::super::dns01_cleanup::PublishedTxt::publish(
+            worker_updater,
+            &propagation(Arc::new(StubUpdater::default())),
+            "_acme-challenge.example.org.".into(),
+            "attempt-value".into(),
+        )
+        .await
+    });
+    updater.started.notified().await;
+    task.abort();
+    let _ = task.await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), updater.deleted.notified())
+            .await
+            .is_err()
+    );
+    updater.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), updater.deleted.notified())
+        .await
+        .unwrap();
 }
