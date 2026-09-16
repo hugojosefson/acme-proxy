@@ -3,7 +3,7 @@
 ## Status
 
 Work started on 2026-09-16 from `a82fa8f`.
-Code commits are pushed. Local container checks are in progress.
+Code commits are pushed. The local DNS-01 container test passed.
 The Git branch is `feat/cloudflare-rfc2136` on the `hugojosefson` remote.
 
 Each planning document has its own commits. Code commits do not include these documents.
@@ -36,8 +36,8 @@ These decisions apply:
 
 ## Remaining work
 
-Finish the DNS-01 container test.
-Push document commits independently after these checks.
+Resolve the existing dependency advisory in its own change.
+Do MSRV and HSM runtime checks with the required tools.
 
 Staging tests await the test domain, Cloudflare zone, dev target, and runtime
 credential method. No staging tests or deployment occurred.
@@ -59,7 +59,7 @@ Line coverage is 97.43%, above the 97% minimum.
 The latest cleanup tests also passed in the 126-test relay suite.
 
 Coverage and Clippy passed after the cleanup tests.
-The DNS-01 container test is building images.
+The DNS-01 container test passed with Certbot and controlled BIND answers.
 `cargo-nextest` and `cargo-llvm-cov` are installed.
 
 ## Deadline and cleanup decisions
@@ -150,3 +150,13 @@ A dependency update needs its own change, tests, and SBOM update.
 
 The MSRV toolchain and SoftHSM are unavailable. Local checks do not include MSRV or HSM runtime tests.
 All-feature Clippy checked compilation of the HSM feature.
+
+## Container test evidence
+
+On 2026-09-16, `relay_signer::test_relay_signer_dns_01` passed with nextest.
+The test took 1252 seconds, with seven image builds. It checked issuance
+through the relay and DNS-01 validation by the upstream CA fixture.
+The proxy image ID is
+`sha256:b4998024d60ed52376e9611eb0ba30e1b368c8057e531fce8a1b3af9bfb6236c`.
+The image contains the DNS behavior from `b10218c`. This local test does not
+replace dev deployment or public staging tests with the Cloudflare bridge.
