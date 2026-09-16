@@ -259,8 +259,11 @@ Coverage and Clippy passed. The DNS-01 container test passed with Certbot
 and controlled BIND answers.
 All 14 DNS-01 strategy tests passed after an added cleanup retry test.
 
-`cargo deny check` returned an error for existing `rustls 0.23.44` (`RUSTSEC-2026-0285`).
-The dependency files did not change.
+The first `cargo deny check` found `RUSTSEC-2026-0285` in `rustls 0.23.44`.
+The update to `0.23.45` and generated SBOM passed `cargo deny check`.
+This dependency update will have its own commit.
+The Rust 1.97 check passed with all targets and features.
+HSM runtime and coverage checks are in progress.
 
 The operator deferred selection of staging resources.
 The [work record](implementation-notes.md) tracks discoveries and decisions.
