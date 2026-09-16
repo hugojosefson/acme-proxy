@@ -9,8 +9,8 @@ contains bridge decisions and test results.
 
 The proxy needs code changes and deployment configuration. Configuration alone
 cannot correct the cleanup request, DNS propagation wait, or response checks.
-This change adds only this document. Proxy implementation must start in a
-different user conversation.
+Implementation started on 2026-09-16. The
+[work record](implementation-notes.md) contains decisions, status, and test results.
 
 Source inspection date: 2026-09-16. Proxy revision:
 [`f005ffa4a32b1868976d9c48b504f7b00e8786ec`](https://github.com/acme-proxy/acme-proxy/commit/f005ffa4a32b1868976d9c48b504f7b00e8786ec).
@@ -23,8 +23,8 @@ The repository has these Git settings:
 
 - Upstream remote `origin`: `git@github.com:acme-proxy/acme-proxy.git`.
 - Fork remote `hugojosefson`: `git@github.com:hugojosefson/acme-proxy.git`.
-- Git branch: `docs/cloudflare-rfc2136-plan`.
-- Git tracking branch: `hugojosefson/docs/cloudflare-rfc2136-plan`.
+- Git branch: `feat/cloudflare-rfc2136`.
+- Git tracking branch: `hugojosefson/feat/cloudflare-rfc2136`.
 
 The local directory is `/home/user/code/current/other/acme-proxy`. Keep
 temporary planning documents in their own commits. Keep this document current
@@ -232,4 +232,4 @@ The implementation conversation must follow this sequence:
 9. Record decisions and evidence as work proceeds.
 
 `bd` is unavailable in the preparation environment. This document records the
-remaining work. No implementation PR was opened during preparation.
+remaining work. The implementation PR must stay in draft status.
