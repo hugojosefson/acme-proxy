@@ -36,8 +36,7 @@ These decisions apply:
 
 ## Remaining work
 
-Update rustls in its own commit, regenerate the SBOM, and do the applicable checks again.
-Finish the HSM, coverage, and container checks.
+The bridge repository needs its own dependency correction before deployment.
 
 Staging tests await the test domain, Cloudflare zone, dev target, and runtime
 credential method. No staging tests or deployment occurred.
@@ -54,8 +53,9 @@ Authentication tests cover three algorithms and incorrect response fields.
 The relay test suite has 126 tests with no failures.
 Clippy with all targets passed.
 
-The complete suite passed: 2262 tests, with 35 skipped container tests.
-Line coverage is 97.43%, above the 97% minimum.
+The updated default suite passed: 2266 tests, with 35 skipped container tests.
+The HSM suite passed: 2285 tests, with 35 skipped container tests.
+Line coverage is 97.44%, above the 97% minimum.
 The latest cleanup tests also passed in the 126-test relay suite.
 
 Coverage and Clippy passed after the cleanup tests.
@@ -133,8 +133,8 @@ An added test checks cleanup retries after CA validation succeeds. It confirms
 one addition, one CA validation request, and three cleanup requests after two
 cleanup failures. All 14 DNS-01 strategy tests passed with this test.
 
-The latest coverage report includes the complete suite and the added cleanup
-worker tests. Line coverage is 97.43%. Rust API documentation and bridge Clippy
+Before the dependency update, the coverage report included the complete suite
+and the added cleanup worker tests. Line coverage was 97.43%. Rust API documentation and bridge Clippy
 checks also passed.
 
 Issuance remains in the existing durable job queue. The cleanup worker only
@@ -165,15 +165,35 @@ replace dev deployment or public staging tests with the Cloudflare bridge.
 
 The operator requested local work without staging resources. The rustls advisory
 specifies `0.23.45` as the corrected version. The manifest minimum and lockfile
-will use that version. This dependency change will have its own commit.
+use that version. Commit `78d9c11` contains only this dependency correction and its changelog entry.
 
 Rust 1.97, SoftHSM, and the pinned SBOM generator are available. SoftHSM tests use only
 the temporary dummy token store from the existing test harness.
 
 The lockfile changes only rustls from `0.23.44` to `0.23.45`. The generated SBOM
 changes only the related version references and checksum. The new `cargo deny`
-check passed advisories, bans, licenses, and sources. MSRV, HSM, and coverage
-checks are in progress.
+check passed advisories, bans, licenses, and sources. The container
+check passed with the corrected dependency.
 
 `cargo +1.97 check --locked --all-targets --all-features` passed with Rust 1.97.1.
 The HSM suite uses `ACME_PROXY_REQUIRE_SOFTHSM=1`, so a missing module causes failure.
+
+The updated default suite passed all 2266 tests, with 35 container tests skipped.
+Line coverage is 97.44%, above the 97% minimum. All five bridge tests passed against bridge
+revision `1821c2cec7798659d30de1c45fdbb1c9ff09738e` with dummy credentials.
+
+The eight SoftHSM tests passed. The complete HSM suite passed all 2285 tests.
+Clippy, the Rust documentation test, and API documentation checks passed.
+
+The bridge tests use a temporary lockfile that resolves rustls `0.23.45`.
+The source bridge lockfile at `1821c2c` contains rustls `0.23.40`, which is
+also in the advisory range. That repository needs its own dependency correction
+before deployment. The proxy change does not modify the bridge checkout.
+
+## Container check after the dependency update
+
+The DNS-01 container test passed with rustls `0.23.45` on 2026-09-16.
+The test took 162 seconds with image builds. It used the source from `78d9c11`.
+The proxy image ID is
+`sha256:621784cda18131d5ae56d5316084872abe103bed3cce79eb57998418b1145546`.
+Public staging and dev deployment did not occur. The PR stays in draft status.
