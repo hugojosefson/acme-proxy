@@ -255,7 +255,8 @@ The full suite passed: 2262 tests. Line coverage is 97.43%.
 The relay suite passed all 126 tests after more cleanup tests.
 All five bridge integration tests passed with dummy credentials.
 
-Coverage and Clippy passed. The DNS-01 container test is building images.
+Coverage and Clippy passed. The DNS-01 container test passed with Certbot
+and controlled BIND answers.
 All 14 DNS-01 strategy tests passed after an added cleanup retry test.
 
 `cargo deny check` returned an error for existing `rustls 0.23.44` (`RUSTSEC-2026-0285`).
