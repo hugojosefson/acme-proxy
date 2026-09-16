@@ -104,8 +104,17 @@ multiple API requests, pagination, and a lock wait.
 
 Specify compatible finite budgets for UPDATE, propagation, validation, and
 cleanup. Include the outer relay attempt and job deadlines. Set limits that
-cover multiple API requests. Record the selected defaults and configuration
-settings here when implementation starts.
+cover multiple API requests. Selected defaults are 60 seconds for UPDATE, 120 seconds for propagation,
+5 seconds for each query, and 2000 milliseconds between queries. Cleanup has
+120 seconds for up to two attempts. DNS-01 relay attempts have 900 seconds.
+CA validation keeps `poll_timeout_secs`, with its 300-second default.
+
+The new settings are `signer.relay.dns01.propagation_resolver`,
+`propagation_timeout_secs`, `propagation_interval_ms`, `query_timeout_secs`,
+`cleanup_timeout_secs`, and `attempt_timeout_secs`. The UPDATE limit is
+`signer.relay.dns01.rfc2136.timeout_secs`. The resolver defaults to
+`1.1.1.1:53` with local caching disabled. The
+[work record](implementation-notes.md) records cancellation behavior and limits.
 
 Test slow API responses, a missing response after a write succeeds, timeout,
 rate limiting, API refusal, and failure after some operations succeed. An
@@ -233,3 +242,12 @@ The implementation conversation must follow this sequence:
 
 `bd` is unavailable in the preparation environment. This document records the
 remaining work. The implementation PR must stay in draft status.
+
+## Implementation status
+
+[PR 1](https://github.com/acme-proxy/acme-proxy/pull/1) is a draft.
+Exact-value cleanup, response checks, and public DNS polling have working code.
+The first relay test pass has 122 tests with no failures. Aggregate checks and
+bridge integration tests are pending.
+The operator deferred selection of staging resources.
+The [work record](implementation-notes.md) tracks discoveries and decisions.
