@@ -11,6 +11,7 @@ struct StubUpdater {
     hidden: std::sync::atomic::AtomicBool,
     queries: std::sync::atomic::AtomicUsize,
     cleanup_fail: bool,
+    cleanup_failures: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -30,7 +31,16 @@ impl dns01::DnsUpdater for StubUpdater {
             .lock()
             .unwrap()
             .push((name.to_string(), value.to_string()));
-        if self.cleanup_fail {
+        if self.cleanup_fail
+            || self
+                .cleanup_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+        {
             return Err("cleanup failed".into());
         }
         Ok(())
@@ -706,4 +716,49 @@ async fn cancellation_during_update_waits_for_the_write_before_cleanup() {
     tokio::time::timeout(Duration::from_secs(1), updater.deleted.notified())
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cleanup_retries_after_ca_validation_without_another_addition() {
+    let upstream = testsrv::start(Script {
+        chain: real_chain().await,
+        pose_challenge: true,
+        ..Script::default()
+    })
+    .await;
+    let dir = TempDir::new("cleanup-retry");
+    let db = database().await;
+    let jobs = crate::config::JobsConfig {
+        max_attempts: 2,
+        ..test_jobs_config()
+    };
+    let queue = test_queue_with(db.clone(), &jobs);
+    let updater = Arc::new(StubUpdater {
+        cleanup_failures: std::sync::atomic::AtomicUsize::new(2),
+        ..StubUpdater::default()
+    });
+    let signer = with_updater(
+        RelaySigner::from_config(
+            &config(&upstream, &dir),
+            &relay_parts(db.clone(), no_notifiers(), queue.clone()),
+            &crate::signer::CarriedState::new(),
+        )
+        .unwrap(),
+        updater.clone(),
+    );
+    let _runner = TestRunner::start_with(queue, &signer, jobs);
+    let order = ready_order(db.clone()).await;
+    signer
+        .issue(
+            &order.id.to_string(),
+            &csr_der(),
+            &identifiers(),
+            RequestedValidity::default(),
+        )
+        .await
+        .unwrap();
+    await_status(db, &order.id.to_string(), OrderStatus::Valid).await;
+    assert_eq!(updater.published.lock().unwrap().len(), 1);
+    assert_eq!(updater.deleted.lock().unwrap().len(), 3);
+    assert_eq!(upstream.challenge_triggered(), 1);
 }
