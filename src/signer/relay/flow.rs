@@ -600,7 +600,7 @@ async fn answer_dns01(
         if authz.status != "pending" && !completed {
             continue;
         }
-        // A reused authorization can omit its challenge token.
+        // A reused authorization can have no challenge token.
         if completed
             && !authz.challenges.iter().any(|challenge| {
                 challenge.typ == crate::challenge::DNS_01 && challenge.token.is_some()

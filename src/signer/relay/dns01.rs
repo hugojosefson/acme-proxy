@@ -51,8 +51,8 @@ pub trait DnsUpdater: Send + Sync {
     /// values, and both must be present at once.
     async fn upsert_txt(&self, name: &str, value: &str) -> Result<(), String>;
 
-    /// Removes only the supplied TXT value. Repeated removal must succeed
-    /// when the value is absent.
+    /// Removes only the supplied TXT value. Removal of a missing value
+    /// must succeed.
     async fn delete_txt(&self, name: &str, value: &str) -> Result<(), String>;
 }
 

@@ -151,7 +151,7 @@ pub struct RelayEabConfig {
 pub struct Dns01Config {
     pub provider: String,
     pub rfc2136: Rfc2136Config,
-    /// Public DNS resolver, independent of the system resolver.
+    /// Public DNS resolver with its own configuration.
     pub propagation_resolver: String,
     pub propagation_timeout_secs: u64,
     pub propagation_interval_ms: u64,

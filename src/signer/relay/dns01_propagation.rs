@@ -39,7 +39,7 @@ impl Propagation {
             .and_then(|value| value.checked_add(dns.cleanup_timeout_secs));
         if required.is_none_or(|value| value >= dns.attempt_timeout_secs) {
             anyhow::bail!(
-                "dns01.attempt_timeout_secs must exceed UPDATE, propagation, validation, and cleanup limits combined"
+                "dns01.attempt_timeout_secs must be more than the combined UPDATE, propagation, validation, and cleanup limits"
             );
         }
         if dns.cleanup_timeout_secs < dns.rfc2136.timeout_secs {
@@ -49,7 +49,7 @@ impl Propagation {
             anyhow::anyhow!("dns01.propagation_resolver must be an IP address and port")
         })?;
         if dns.propagation_resolver == dns.rfc2136.server {
-            anyhow::bail!("dns01.propagation_resolver must differ from the UPDATE server");
+            anyhow::bail!("dns01.propagation_resolver must be different from the UPDATE server");
         }
         Ok(Self {
             resolver: Arc::new(HickoryResolver::from_address_uncached(addr)?),
