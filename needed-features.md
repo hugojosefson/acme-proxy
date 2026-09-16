@@ -31,9 +31,9 @@ temporary planning documents in their own commits. Keep this document current
 with decisions, test results, and remaining work. Commit and push changes to
 `hugojosefson` as work progresses.
 
-## Source findings
+## Initial source findings
 
-The inspected source shows these behaviors:
+The source at the inspection revision showed these behaviors:
 
 | Source | Finding |
 | --- | --- |
@@ -98,13 +98,15 @@ different staging test for public DNS propagation.
 
 ## Timeout budgets and retries
 
-The proxy currently permits ten seconds for an UPDATE exchange. The bridge
+The initial proxy permitted ten seconds for an UPDATE exchange. The bridge
 permits fifteen seconds for each Cloudflare API request. One UPDATE can use
 multiple API requests, pagination, and a lock wait.
 
 Specify compatible finite budgets for UPDATE, propagation, validation, and
 cleanup. Include the outer relay attempt and job deadlines. Set limits that
-cover multiple API requests. Selected defaults are 60 seconds for UPDATE and
+cover multiple API requests.
+
+Selected defaults are 60 seconds for UPDATE and
 120 seconds for propagation. Other defaults are
 5 seconds for each query, and 2000 milliseconds between queries. Cleanup has
 120 seconds for a maximum of two attempts. DNS-01 relay attempts have 900 seconds.
@@ -248,7 +250,16 @@ remaining work. The implementation PR must stay in draft status.
 
 [PR 1](https://github.com/acme-proxy/acme-proxy/pull/1) is a draft.
 Exact-value cleanup, response checks, and public DNS polling have working code.
-The relay test suite has 123 tests with no failures. Aggregate checks and
-bridge integration tests are pending.
+
+The full suite passed: 2262 tests. Line coverage is 97.43%.
+The relay suite passed all 126 tests after more cleanup tests.
+All five bridge integration tests passed with dummy credentials.
+
+Coverage and Clippy passed. The DNS-01 container test is building images.
+All 14 DNS-01 strategy tests passed after an added cleanup retry test.
+
+`cargo deny check` returned an error for existing `rustls 0.23.44` (`RUSTSEC-2026-0285`).
+The dependency files did not change.
+
 The operator deferred selection of staging resources.
 The [work record](implementation-notes.md) tracks discoveries and decisions.
