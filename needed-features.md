@@ -251,7 +251,7 @@ remaining work. The implementation PR must stay in draft status.
 [PR 1](https://github.com/acme-proxy/acme-proxy/pull/1) is a draft.
 Exact-value cleanup, response checks, and public DNS polling have working code.
 
-The full suite passed: 2262 tests. Line coverage is 97.43%.
+The full default suite passed: 2266 tests. Line coverage is 97.44%.
 The relay suite passed all 126 tests after more cleanup tests.
 All five bridge integration tests passed with dummy credentials.
 
@@ -261,9 +261,15 @@ All 14 DNS-01 strategy tests passed after an added cleanup retry test.
 
 The first `cargo deny check` found `RUSTSEC-2026-0285` in `rustls 0.23.44`.
 The update to `0.23.45` and generated SBOM passed `cargo deny check`.
-This dependency update will have its own commit.
+Commit `78d9c11` contains only the dependency correction and its changelog entry.
+
 The Rust 1.97 check passed with all targets and features.
-HSM runtime and coverage checks are in progress.
+With the updated dependency, all 2266 default tests and five bridge tests passed.
+Line coverage is 97.44%. Clippy passed with all targets and features.
+
+The complete HSM suite passed all 2285 tests with SoftHSM required.
+The DNS-01 container check also passed with the corrected dependency.
+The bridge source lockfile also needs a rustls correction before deployment.
 
 The operator deferred selection of staging resources.
 The [work record](implementation-notes.md) tracks discoveries and decisions.
