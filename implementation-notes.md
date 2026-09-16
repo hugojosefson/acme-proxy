@@ -36,8 +36,8 @@ These decisions apply:
 
 ## Remaining work
 
-Resolve the existing dependency advisory in its own change.
-Do MSRV and HSM runtime checks with the required tools.
+Update rustls in its own commit, regenerate the SBOM, and do the applicable checks again.
+Finish the HSM, coverage, and container checks.
 
 Staging tests await the test domain, Cloudflare zone, dev target, and runtime
 credential method. No staging tests or deployment occurred.
@@ -143,12 +143,12 @@ second issuance scheduler or promise cleanup after a process crash.
 
 ## Dependency check
 
-`cargo deny check` returned an error for the existing `rustls 0.23.44` dependency.
+The first `cargo deny check` returned an error for `rustls 0.23.44`.
 The reported advisory is `RUSTSEC-2026-0285`. Bans, licenses, and sources passed.
-`Cargo.toml`, `Cargo.lock`, and `deny.toml` have no changes from the base revision.
-A dependency update needs its own change, tests, and SBOM update.
+At that checkpoint, the dependency files had no changes from the base revision.
+The subsequent dependency update has its own change, tests, and SBOM update.
 
-The MSRV toolchain and SoftHSM are unavailable. Local checks do not include MSRV or HSM runtime tests.
+The first checks omitted MSRV and HSM runtime tests because the tools were missing.
 All-feature Clippy checked compilation of the HSM feature.
 
 ## Container test evidence
@@ -160,3 +160,20 @@ The proxy image ID is
 `sha256:b4998024d60ed52376e9611eb0ba30e1b368c8057e531fce8a1b3af9bfb6236c`.
 The image contains the DNS behavior from `b10218c`. This local test does not
 replace dev deployment or public staging tests with the Cloudflare bridge.
+
+## Continued local checks
+
+The operator requested local work without staging resources. The rustls advisory
+specifies `0.23.45` as the corrected version. The manifest minimum and lockfile
+will use that version. This dependency change will have its own commit.
+
+Rust 1.97, SoftHSM, and the pinned SBOM generator are available. SoftHSM tests use only
+the temporary dummy token store from the existing test harness.
+
+The lockfile changes only rustls from `0.23.44` to `0.23.45`. The generated SBOM
+changes only the related version references and checksum. The new `cargo deny`
+check passed advisories, bans, licenses, and sources. MSRV, HSM, and coverage
+checks are in progress.
+
+`cargo +1.97 check --locked --all-targets --all-features` passed with Rust 1.97.1.
+The HSM suite uses `ACME_PROXY_REQUIRE_SOFTHSM=1`, so a missing module causes failure.
