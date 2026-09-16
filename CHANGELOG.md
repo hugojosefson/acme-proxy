@@ -41,6 +41,13 @@ The DNS-01 changes are:
   settings control UPDATE, propagation, cleanup, and relay attempt deadlines.
   Cancellation starts bounded cleanup after the UPDATE finishes.
 
+### Security
+
+The rustls update is:
+
+- Set the minimum rustls version to `0.23.45` for the
+  [RUSTSEC-2026-0285 correction](https://github.com/rustls/rustls/security/advisories/GHSA-2mjx-qc3c-rqvc).
+
 ## [0.5.0] — 2026-09-08
 
 ### Breaking
