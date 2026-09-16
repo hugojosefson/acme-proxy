@@ -3,16 +3,17 @@
 ## Status
 
 Work started on 2026-09-16 from `a82fa8f`.
-Code changes and local tests are in progress.
+Code commits are pushed. Local container checks are in progress.
 The Git branch is `feat/cloudflare-rfc2136` on the `hugojosefson` remote.
+
 Each planning document has its own commits. Code commits do not include these documents.
 The PR must stay in draft status.
 
 ## Source inspection
 
 
-The updater removes the full TXT record set and accepts unsigned responses.
-The DNS-01 flow starts CA validation immediately after the UPDATE response.
+The initial updater removed the full TXT record set and accepted unsigned responses.
+The initial DNS-01 flow started CA validation immediately after the UPDATE response.
 The job runner aborts the task when the attempt deadline expires.
 The local bridge has protocol tests and a mock Cloudflare API.
 Rust `1.98.1`, Docker, and the test tools are available.
@@ -35,10 +36,8 @@ These decisions apply:
 
 ## Remaining work
 
-Finish aggregate checks and bridge tests.
-Do the DNS-01 container test with its propagation resolver fixture.
-Do formatting, Clippy, coverage, documentation, and applicable integration checks.
-Push code and document commits independently as work proceeds.
+Finish the DNS-01 container test.
+Push document commits independently after these checks.
 
 Staging tests await the test domain, Cloudflare zone, dev target, and runtime
 credential method. No staging tests or deployment occurred.
@@ -52,10 +51,15 @@ Changes must satisfy these requirements only. Unrelated changes are outside scop
 The working code uses exact-value cleanup and checks response authentication.
 Packet tests cover duplicate additions and removals with two TXT values.
 Authentication tests cover three algorithms and incorrect response fields.
-The relay test suite has 123 tests with no failures.
+The relay test suite has 126 tests with no failures.
 Clippy with all targets passed.
 
-More tests and aggregate checks are pending.
+The complete suite passed: 2262 tests, with 35 skipped container tests.
+Line coverage is 97.43%, above the 97% minimum.
+The latest cleanup tests also passed in the 126-test relay suite.
+
+Coverage and Clippy passed after the cleanup tests.
+The DNS-01 container test is building images.
 `cargo-nextest` and `cargo-llvm-cov` are installed.
 
 ## Deadline and cleanup decisions
@@ -108,8 +112,41 @@ A new local bridge test runner copies the bridge source into a temporary crate.
 It uses the actual proxy updater and bridge with a mock API and dummy credentials.
 The first test iteration identified two fixture errors: a trailing DNS root dot
 in mock API records and the DNS status display spelling. Both fixtures changed.
-The bridge test rerun is pending. It does not prove public certificate issuance.
+
+All five bridge tests passed. They do not prove public certificate issuance.
+The tests use bridge revision `6f8f609b34bd700e9988b7f56cf98ff75176015e`.
+They cover concurrent values, duplicate operations, API refusal, rate limiting,
+cleanup failures after some removals, missing responses after writes, and an 11-second API response.
 
 The book build and documentation lint passed. The Rust documentation test passed.
-Clippy with all targets and all features passed. The complete coverage suite is
-in progress. Staging resources are undecided, as the operator specified.
+Clippy with all targets and all features passed. The complete coverage suite
+passed. Staging resources are undecided, as the operator specified.
+
+## Code checkpoints
+
+The code changes are in `b10218c`. The bridge tests are in `5123598`.
+These commits are pushed. Planning documents have their own commits.
+The cleanup retry test is in `d93229a`. Commit `4013c6f` applies the requested
+English rules to new comments and configuration errors only.
+
+An added test checks cleanup retries after CA validation succeeds. It confirms
+one addition, one CA validation request, and three cleanup requests after two
+cleanup failures. All 14 DNS-01 strategy tests passed with this test.
+
+The latest coverage report includes the complete suite and the added cleanup
+worker tests. Line coverage is 97.43%. Rust API documentation and bridge Clippy
+checks also passed.
+
+Issuance remains in the existing durable job queue. The cleanup worker only
+retains the current network operation after cancellation. It does not add a
+second issuance scheduler or promise cleanup after a process crash.
+
+## Dependency check
+
+`cargo deny check` returned an error for the existing `rustls 0.23.44` dependency.
+The reported advisory is `RUSTSEC-2026-0285`. Bans, licenses, and sources passed.
+`Cargo.toml`, `Cargo.lock`, and `deny.toml` have no changes from the base revision.
+A dependency update needs its own change, tests, and SBOM update.
+
+The MSRV toolchain and SoftHSM are unavailable. Local checks do not include MSRV or HSM runtime tests.
+All-feature Clippy checked compilation of the HSM feature.
