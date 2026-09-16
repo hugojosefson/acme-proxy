@@ -15,7 +15,7 @@ The updater removes the full TXT record set and accepts unsigned responses.
 The DNS-01 flow starts CA validation immediately after the UPDATE response.
 The job runner aborts the task when the attempt deadline expires.
 The local bridge has protocol tests and a mock Cloudflare API.
-Rust `1.98.1` and Docker are available. Test tool installation is in progress.
+Rust `1.98.1`, Docker, and the test tools are available.
 
 The `/tmp` user quota prevents new temporary files. Temporary work uses
 `/home/user/.cache/agents/acme-implementation`.
@@ -35,8 +35,8 @@ These decisions apply:
 
 ## Remaining work
 
-Select and record finite deadlines and cancellation cleanup behavior.
-Add packet tests, authentication tests, propagation tests, and bridge tests.
+Finish aggregate checks and bridge tests.
+Do the DNS-01 container test with its propagation resolver fixture.
 Do formatting, Clippy, coverage, documentation, and applicable integration checks.
 Push code and document commits independently as work proceeds.
 
@@ -96,4 +96,20 @@ cleanup without another addition or validation request.
 The contribution instructions, PR template, parent AGENTS instructions, and
 applicable CLAUDE instructions were inspected. The PR uses the fork and a feature
 branch. Unit tests use nextest. Configuration changes must have example, book,
-and changelog entries. `bd` is unavailable. this record contains the remaining work.
+and changelog entries. `bd` is unavailable. This record contains the remaining work.
+
+## More tests
+
+The existing DNS-01 container test uses the private `lab.` zone. Its BIND fixture
+has another query port, `5353`, for controlled propagation answers. The UPDATE
+endpoint stays on port `53`.
+
+A new local bridge test runner copies the bridge source into a temporary crate.
+It uses the actual proxy updater and bridge with a mock API and dummy credentials.
+The first test iteration identified two fixture errors: a trailing DNS root dot
+in mock API records and the DNS status display spelling. Both fixtures changed.
+The bridge test rerun is pending. It does not prove public certificate issuance.
+
+The book build and documentation lint passed. The Rust documentation test passed.
+Clippy with all targets and all features passed. The complete coverage suite is
+in progress. Staging resources are undecided, as the operator specified.
